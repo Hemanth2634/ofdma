@@ -1,0 +1,102 @@
+import numpy as np
+
+# ----------------------------- QPSK Modulation -----------------------------
+def qpsk_modulate(bits):
+    bits = bits.reshape((-1, 2))
+    symbols = (2*bits[:,0]-1) + 1j*(2*bits[:,1]-1)
+    return symbols / np.sqrt(2)
+
+def qpsk_demodulate(symbols):
+    bits = np.zeros((len(symbols), 2), dtype=int)
+    bits[:,0] = (symbols.real > 0).astype(int)
+    bits[:,1] = (symbols.imag > 0).astype(int)
+    return bits.reshape(-1)
+
+# ----------------------------- Rayleigh Channel -----------------------------
+def rayleigh_fading(signal):
+    h = (np.random.randn(len(signal)) + 1j*np.random.randn(len(signal))) / np.sqrt(2)
+    faded = signal * h
+    return faded, h
+
+# ----------------------------- OFDMA Transmitter -----------------------------
+def ofdma_transmitter(data_bits, num_users, subcarriers_per_user, N_fft, cp_len):
+    mod_symbols = qpsk_modulate(data_bits)
+    symbols_per_user = len(mod_symbols) // num_users
+    tx_signal = []
+
+    for i in range(num_users):
+        user_symbols = mod_symbols[i*symbols_per_user : (i+1)*symbols_per_user]
+        user_ofdm = []
+
+        for j in range(0, len(user_symbols), subcarriers_per_user):
+            freq_data = np.zeros(N_fft, dtype=complex)
+            freq_data[i*subcarriers_per_user:(i+1)*subcarriers_per_user] = user_symbols[j:j+subcarriers_per_user]
+            time_data = np.fft.ifft(freq_data)
+            # Add cyclic prefix
+            time_cp = np.concatenate([time_data[-cp_len:], time_data])
+            user_ofdm.append(time_cp)
+
+        tx_signal.append(np.concatenate(user_ofdm))
+
+    return np.array(tx_signal)
+
+# ----------------------------- OFDMA Receiver -----------------------------
+def ofdma_receiver(rx_signal, h_estimates, num_users, subcarriers_per_user, N_fft, cp_len):
+    all_bits = []
+
+    for i in range(num_users):
+        user_rx = rx_signal[i]
+        ofdm_symbols = user_rx.reshape(-1, N_fft + cp_len)
+        user_data = []
+
+        for sym_idx, sym in enumerate(ofdm_symbols):
+            time_no_cp = sym[cp_len:]
+            freq_data = np.fft.fft(time_no_cp)
+
+            # Equalization (per-subcarrier)
+            h = h_estimates[i][sym_idx*(N_fft + cp_len) + cp_len : sym_idx*(N_fft + cp_len) + cp_len + N_fft]
+            faded_subcarriers = freq_data[i*subcarriers_per_user:(i+1)*subcarriers_per_user]
+            h_sub = h[i*subcarriers_per_user:(i+1)*subcarriers_per_user]
+            equalized = faded_subcarriers / h_sub
+            user_data.extend(equalized)
+
+        bits = qpsk_demodulate(np.array(user_data))
+        all_bits.append(bits)
+
+    return all_bits
+
+# ----------------------------- Simulation -----------------------------
+def simulate_ofdma():
+    num_users = 2
+    subcarriers_per_user = 4
+    N_fft = 8
+    cp_len = 2
+    num_ofdm_symbols = 10
+    total_bits = num_users * subcarriers_per_user * 2 * num_ofdm_symbols
+
+    data_bits = np.random.randint(0, 2, total_bits)
+
+    # Transmit
+    tx_signal = ofdma_transmitter(data_bits, num_users, subcarriers_per_user, N_fft, cp_len)
+
+    # Channel: Rayleigh fading + AWGN
+    rx_signal = np.zeros_like(tx_signal, dtype=complex)
+    h_estimates = []
+
+    for i in range(num_users):
+        faded, h = rayleigh_fading(tx_signal[i])
+        noise = 0.05 * (np.random.randn(*faded.shape) + 1j*np.random.randn(*faded.shape))
+        rx_signal[i] = faded + noise
+        h_estimates.append(h)
+
+    # Receive
+    received_bits = ofdma_receiver(rx_signal, h_estimates, num_users, subcarriers_per_user, N_fft, cp_len)
+
+    # BER
+    for i in range(num_users):
+        original = data_bits[i*len(received_bits[i]) : (i+1)*len(received_bits[i])]
+        ber = np.sum(original != received_bits[i]) / len(original)
+        print(f"User {i+1} BER: {ber:.4f}")
+
+simulate_ofdma()
+
